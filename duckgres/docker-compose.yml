@@ -1,0 +1,145 @@
+name: pgconsole-duckgres
+
+services:
+  rustfs-data-init:
+    image: alpine:3.22
+    command: ["sh", "-c", "chown -R 10001:10001 /data"]
+    volumes:
+      - rustfs-data:/data
+    restart: "no"
+
+  rustfs:
+    image: rustfs/rustfs:1.0.0-rc.6
+    depends_on:
+      rustfs-data-init:
+        condition: service_completed_successfully
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_ACCESS_KEY: ducklake
+      RUSTFS_SECRET_KEY: ducklake-secret-change-me
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - rustfs-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/health"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  rustfs-init:
+    image: rustfs/rc:v0.1.35
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    environment:
+      RC_HOST_rustfs: "http://ducklake:ducklake-secret-change-me@rustfs:9000"
+      RC_CONFIG_DIR: /tmp/rc
+    command: ["mb", "rustfs/ducklake", "--ignore-existing"]
+
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: ducklake
+      POSTGRES_USER: ducklake
+      POSTGRES_PASSWORD: ducklake-change-me
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ducklake -h localhost"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+
+  duckgres:
+    image: ghcr.io/accademiaforense/afod-duckgres:sha-0042577
+    build:
+      context: https://github.com/AccademiaForense/duckgres.git#00425772f68b4fc76ad40563817116fa6a570809
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rustfs-init:
+        condition: service_completed_successfully
+    command: ["--config", "/app/duckgres.yaml"]
+    ports:
+      - "${DUCKGRES_PORT:-5432}:5432"
+    volumes:
+      - ./duckgres.yaml:/app/duckgres.yaml:ro
+      - duckgres-data:/app/data
+      - duckgres-certs:/app/certs
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "ducklake"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  pgconsole:
+    image: pgconsole:dev
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    depends_on:
+      duckgres:
+        condition: service_healthy
+    ports:
+      - "9876:9876"
+    configs:
+      - source: pgconsole_config
+        target: /etc/pgconsole.toml
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:9876').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 10s
+
+  seed:
+    image: postgres:17
+    profiles: ["tools"]
+    depends_on:
+      duckgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ducklake-change-me
+    volumes:
+      - ./seed.sql:/seed.sql:ro
+    entrypoint:
+      [
+        "psql",
+        "host=duckgres port=5432 user=ducklake dbname=ducklake sslmode=require",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-f",
+        "/seed.sql",
+      ]
+
+volumes:
+  rustfs-data:
+  postgres-data:
+  duckgres-data:
+  duckgres-certs:
+
+configs:
+  pgconsole_config:
+    content: |
+      [[connections]]
+      id = "duckgres"
+      name = "Duckgres (DuckLake on RustFS)"
+      host = "duckgres"
+      port = 5432
+      database = "ducklake"
+      username = "ducklake"
+      password = "ducklake-change-me"
+      ssl_mode = "require"

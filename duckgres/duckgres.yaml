@@ -1,0 +1,34 @@
+host: "0.0.0.0"
+port: 5432
+
+data_dir: "/app/data"
+
+tls:
+  cert: "/app/certs/server.crt"
+  key: "/app/certs/server.key"
+
+users:
+  ducklake: "ducklake-change-me"
+
+process_isolation: false
+
+extensions:
+  - ducklake
+  - httpfs
+
+query_log:
+  enabled: false
+
+ducklake:
+  metadata_store: "postgres:host=postgres port=5432 user=ducklake password=ducklake-change-me dbname=ducklake sslmode=disable"
+  object_store: "s3://ducklake/data/"
+  s3_provider: "config"
+  s3_endpoint: "rustfs:9000"
+  s3_access_key: "ducklake"
+  s3_secret_key: "ducklake-secret-change-me"
+  s3_region: "us-east-1"
+  s3_use_ssl: false
+  s3_url_style: "path"
+  data_inlining_row_limit: 5
+  checkpoint_interval: "6h"
+  delta_catalog_enabled: false
