@@ -58,12 +58,22 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
 
+  duckgres-volume-perms:
+    image: ghcr.io/accademiaforense/duckgres:latest
+    pull_policy: always
+    user: "0:0"
+    entrypoint: ["sh", "-c", "chown -R duckgres:duckgres /app/data /app/certs"]
+    volumes:
+      - duckgres-data:/app/data
+      - duckgres-certs:/app/certs
+    restart: "no"
+
   duckgres:
-    image: ghcr.io/accademiaforense/afod-duckgres:sha-0042577
-    build:
-      context: https://github.com/AccademiaForense/duckgres.git#00425772f68b4fc76ad40563817116fa6a570809
-      dockerfile: Dockerfile
+    image: ghcr.io/accademiaforense/duckgres:latest
+    pull_policy: always
     depends_on:
+      duckgres-volume-perms:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       rustfs-init:

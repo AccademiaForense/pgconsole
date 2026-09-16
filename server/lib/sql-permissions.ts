@@ -1,4 +1,4 @@
-import { parseSql, type Statement, type Expr } from "../../src/lib/sql/core";
+import { parseSql, type Statement, type Expr, type FromClause, type TableRef } from "../../src/lib/sql/core";
 import { PG_SYSTEM_FUNCTIONS } from "../../src/lib/sql/pg-system-functions";
 import type { Permission } from "./config";
 
@@ -203,6 +203,53 @@ export interface SqlAnalysis {
   statementCount: number
   /** True when all statements can safely run inside a transaction block */
   transactionSafe: boolean
+  /** Unique tables referenced by the statements (subqueries excluded) */
+  tables: { schema: string | null; table: string }[]
+}
+
+function collectFromTables(from: FromClause | null, out: TableRef[]): void {
+  if (!from) return
+  switch (from.kind) {
+    case 'table':
+      out.push(from)
+      return
+    case 'join':
+      collectFromTables(from.left, out)
+      collectFromTables(from.right, out)
+      return
+    default:
+      return
+  }
+}
+
+function statementTables(stmt: Statement): TableRef[] {
+  switch (stmt.kind) {
+    case 'select': {
+      const out: TableRef[] = []
+      collectFromTables(stmt.from, out)
+      return out
+    }
+    case 'insert':
+    case 'update':
+    case 'delete':
+      return [stmt.table]
+    default:
+      return []
+  }
+}
+
+function uniqueTables(stmts: Statement[]): { schema: string | null; table: string }[] {
+  const seen = new Set<string>()
+  const out: { schema: string | null; table: string }[] = []
+  for (const stmt of stmts) {
+    for (const ref of statementTables(stmt)) {
+      const key = `${ref.schema ?? ''}.${ref.table.toLowerCase()}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push({ schema: ref.schema, table: ref.table })
+    }
+  }
+  return out
 }
 
 /** Detect all permissions required to execute a SQL statement */
@@ -210,7 +257,7 @@ export async function detectRequiredPermissions(sql: string): Promise<SqlAnalysi
   try {
     const parsed = await parseSql(sql)
     if (parsed.statements.length === 0) {
-      return { permissions: new Set(['read']), kinds: [], primaryPermissions: [], statementCount: 0, transactionSafe: true }
+      return { permissions: new Set(['read']), kinds: [], primaryPermissions: [], statementCount: 0, transactionSafe: true, tables: [] }
     }
 
     const permissions = new Set<Permission>()
@@ -242,7 +289,7 @@ export async function detectRequiredPermissions(sql: string): Promise<SqlAnalysi
       }
     }
 
-    return { permissions, kinds, primaryPermissions, statementCount: parsed.statements.length, transactionSafe }
+    return { permissions, kinds, primaryPermissions, statementCount: parsed.statements.length, transactionSafe, tables: uniqueTables(parsed.statements) }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     throw new Error(`SQL syntax error: ${message}`)
