@@ -75,7 +75,8 @@ interface ColumnMeta {
 
 async function getColumnMetadata(
   client: ReturnType<typeof postgres>,
-  columns: { name: string; type: number; table?: number }[]
+  columns: { name: string; type: number; table?: number }[],
+  fallbackTable?: { schema: string | null; table: string } | null
 ): Promise<ColumnMeta[]> {
   if (columns.length === 0) return [];
 
@@ -142,8 +143,8 @@ async function getColumnMetadata(
     return {
       name: col.name,
       type: oidToType.get(col.type) || 'unknown',
-      tableName: info?.table || '',
-      schemaName: info?.schema || '',
+      tableName: info?.table || fallbackTable?.table || '',
+      schemaName: info?.schema || fallbackTable?.schema || '',
       isPrimaryKey: info?.pkColumns.has(col.name) || false,
       isNullable: !isNotNull,
       hasDefault: info?.defaultColumns.has(col.name) || false,
@@ -228,7 +229,8 @@ export const queryServiceHandlers: ServiceImpl<typeof QueryService> = {
             name: col.name,
             type: col.type,
             table: col.table,
-          }))
+          })),
+          analysis.tables.length === 1 ? analysis.tables[0] : null
         );
       } else if (result.length > 0) {
         // Fallback: no metadata available

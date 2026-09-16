@@ -958,7 +958,7 @@ export function QueryResults({
       const tableName = columns[0]?.tableName || ''
       const schemaName = columns[0]?.schemaName || ''
       const pkColumns = columns.filter(c => c.isPrimaryKey)
-      changes.push({
+      if (tableName) changes.push({
         id: 'delete',
         type: 'delete',
         tables: [{
@@ -982,7 +982,7 @@ export function QueryResults({
       const tableName = columns[0]?.tableName || ''
       const schemaName = columns[0]?.schemaName || ''
       const pkColumns = columns.filter(c => c.isPrimaryKey)
-      changes.push({
+      if (tableName) changes.push({
         id: 'update',
         type: 'update',
         tables: [{
@@ -1017,7 +1017,7 @@ export function QueryResults({
     if (inserts.length > 0) {
       const tableName = columns[0]?.tableName || ''
       const schemaName = columns[0]?.schemaName || ''
-      changes.push({
+      if (tableName) changes.push({
         id: 'insert',
         type: 'insert',
         tables: [{
