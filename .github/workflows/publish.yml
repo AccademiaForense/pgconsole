@@ -8,22 +8,22 @@
 
 name: Publish
 
-on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Version tag (e.g. 1.2.0). If empty, auto-detected from package.json."
-        required: false
-      npm_tag:
-        description: "NPM tag (e.g., latest, beta). Only used for npm publish."
-        required: false
-        default: "latest"
-  push:
-    branches: [main]
-    paths-ignore:
-      - "docs/**"
-      - "website/**"
-      - "worker/**"
+# on:
+#   workflow_dispatch:
+#     inputs:
+#       version:
+#         description: "Version tag (e.g. 1.2.0). If empty, auto-detected from package.json."
+#         required: false
+#       npm_tag:
+#         description: "NPM tag (e.g., latest, beta). Only used for npm publish."
+#         required: false
+#         default: "latest"
+#   push:
+#     branches: [main]
+#     paths-ignore:
+#       - "docs/**"
+#       - "website/**"
+#       - "worker/**"
 
 env:
   IMAGE_NAME: pgplex/pgconsole

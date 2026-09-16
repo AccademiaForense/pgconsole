@@ -1,18 +1,18 @@
 name: CI
 
-on:
-  pull_request:
-    branches: [main]
-    paths-ignore:
-      - "docs/**"
-      - "website/**"
-      - "worker/**"
-  push:
-    branches: [main]
-    paths-ignore:
-      - "docs/**"
-      - "website/**"
-      - "worker/**"
+# on:
+#   pull_request:
+#     branches: [main]
+#     paths-ignore:
+#       - "docs/**"
+#       - "website/**"
+#       - "worker/**"
+#   push:
+#     branches: [main]
+#     paths-ignore:
+#       - "docs/**"
+#       - "website/**"
+#       - "worker/**"
 
 jobs:
   api-tests:

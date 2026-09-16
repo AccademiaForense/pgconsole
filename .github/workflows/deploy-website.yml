@@ -1,11 +1,11 @@
 name: Deploy Website
 
-on:
-  push:
-    branches: [main]
-    paths:
-      - "website/**"
-  workflow_dispatch:
+# on:
+#   push:
+#     branches: [main]
+#     paths:
+#       - "website/**"
+#   workflow_dispatch:
 
 defaults:
   run:

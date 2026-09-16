@@ -1,11 +1,11 @@
 name: Deploy Demo
 
-on:
-  workflow_dispatch:
-  workflow_run:
-    workflows: ["Publish"]
-    types: [completed]
-    branches: [main]
+# on:
+#   workflow_dispatch:
+#   workflow_run:
+#     workflows: ["Publish"]
+#     types: [completed]
+#     branches: [main]
 
 jobs:
   deploy:
