@@ -87,7 +87,7 @@ async function getColumnMetadata(
   const typeRows = await client`
     SELECT oid::int as oid, typname
     FROM pg_type
-    WHERE oid = ANY(${typeOids}::oid[])
+    WHERE oid IN ${client(typeOids)}
   `;
   const oidToType = new Map<number, string>();
   for (const row of typeRows) {
@@ -123,7 +123,7 @@ async function getColumnMetadata(
         ) as default_columns
       FROM pg_class c
       JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE c.oid = ANY(${tableOids}::oid[])
+      WHERE c.oid IN ${client(tableOids)}
     `;
     for (const row of tableRows) {
       tableInfo.set(row.oid as number, {

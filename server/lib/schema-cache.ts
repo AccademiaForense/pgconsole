@@ -111,7 +111,7 @@ async function buildSchemaContext(
       LEFT JOIN pg_attrdef ad ON ad.adrelid = c.oid AND ad.adnum = a.attnum
       WHERE c.relkind IN ('r', 'v', 'm')
         AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
-        ${schemas.length > 0 ? client`AND n.nspname = ANY(${schemas})` : client``}
+        ${schemas.length > 0 ? client`AND n.nspname IN ${client(schemas)}` : client``}
         AND a.attnum > 0
         AND NOT a.attisdropped
       GROUP BY n.nspname, c.relname, c.oid, c.relkind
@@ -143,7 +143,7 @@ async function buildSchemaContext(
       LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(con.conkey)
       LEFT JOIN pg_attribute af ON af.attrelid = con.confrelid AND af.attnum = ANY(con.confkey)
       WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
-        ${schemas.length > 0 ? client`AND n.nspname = ANY(${schemas})` : client``}
+        ${schemas.length > 0 ? client`AND n.nspname IN ${client(schemas)}` : client``}
         AND con.contype IN ('p', 'f', 'u', 'c')
       GROUP BY n.nspname, c.relname, con.conname, con.contype, con.oid, con.confrelid
       ORDER BY n.nspname, c.relname, con.contype
@@ -165,7 +165,7 @@ async function buildSchemaContext(
       JOIN pg_namespace n ON n.oid = c.relnamespace
       JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(ix.indkey)
       WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
-        ${schemas.length > 0 ? client`AND n.nspname = ANY(${schemas})` : client``}
+        ${schemas.length > 0 ? client`AND n.nspname IN ${client(schemas)}` : client``}
         AND NOT ix.indisprimary  -- Exclude PK indexes (shown in constraints)
       GROUP BY n.nspname, c.relname, i.relname, ix.indisunique, ix.indisprimary, ix.indexrelid
       ORDER BY n.nspname, c.relname, i.relname

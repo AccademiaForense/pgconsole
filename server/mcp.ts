@@ -366,7 +366,7 @@ async function listObjects(principal: Principal, args: Record<string, unknown>) 
         FROM pg_class c
         JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = ${schema}
-          AND c.relkind::text = ANY(${relkinds})
+          AND c.relkind::text IN ${sql(relkinds)}
           AND (${nameFilter ?? null}::text IS NULL OR c.relname ILIKE '%' || ${nameFilter ?? null} || '%')
           AND (${cursor ?? null}::text IS NULL OR c.relname > ${cursor ?? null})
         ORDER BY c.relname
