@@ -5,6 +5,10 @@
 
 import { formatSql } from './format'
 
+export function quoteIdentifier(name: string): string {
+  return `"${name.replace(/"/g, '""')}"`
+}
+
 export interface Column {
   name: string
   type: string
@@ -15,7 +19,7 @@ export interface Column {
  * Generate a SELECT statement.
  */
 export async function generateSelect(table: string): Promise<string> {
-  const sql = `SELECT * FROM ${table} LIMIT 100`
+  const sql = `SELECT * FROM ${table} LIMIT 10`
   return formatSql(sql)
 }
 
@@ -82,8 +86,10 @@ export async function generateDelete(table: string, pkColumns: string[]): Promis
 /**
  * Generate a CREATE TABLE statement template.
  */
-export async function generateCreateTable(): Promise<string> {
-  const sql = `CREATE TABLE table_name (id serial PRIMARY KEY, column_name data_type)`
+export async function generateCreateTable(duckgres = false): Promise<string> {
+  const sql = duckgres
+    ? `CREATE TABLE table_name (id bigint, column_name text)`
+    : `CREATE TABLE table_name (id serial PRIMARY KEY, column_name data_type)`
   return formatSql(sql)
 }
 

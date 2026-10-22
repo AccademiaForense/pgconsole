@@ -170,7 +170,7 @@ export function Chat({ connectionId, onInsertSQL, onRunSQL, selectedSchema, init
     setMessages([])
     setSessionId(null)
     setConversationMode('generate')
-  }, [connectionId, selectedProvider, schemaMode, customSchemasKey])
+  }, [connectionId, selectedProvider, schemaMode, customSchemasKey, selectedSchema])
 
   // Handle initial prompt (e.g., from "Explain with AI")
   useEffect(() => {

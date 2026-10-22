@@ -4,7 +4,7 @@ import { ConnectionService } from "../../src/gen/connection_connect"
 import { getConnections, getConnectionById, getLabels } from "../lib/config"
 import type { ConnectionConfig } from "../lib/config"
 import { createClient } from "../lib/db"
-import { tryGetConnectionInfo, testAndCacheConnection } from "../lib/connection-cache"
+import { tryGetConnectionInfo, testAndCacheConnection, isDuckgres } from "../lib/connection-cache"
 import { getUserFromContext } from "../connect"
 import { getAccessibleConnectionIds, getUserPermissions, requireAnyPermission, type Permission } from "../lib/iam"
 
@@ -31,6 +31,7 @@ function toConnectionResponse(conn: ConnectionConfig, userPermissions: Set<Permi
     version: info.version || '',
     permissions: Array.from(userPermissions),
     color: conn.color || '',
+    isDuckgres: isDuckgres(conn.id),
   }
 }
 

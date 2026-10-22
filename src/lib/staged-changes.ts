@@ -7,6 +7,7 @@ export interface TableChange {
   tableName: string
   schemaName: string
   primaryKeyColumns: string[]
+  columnTypes?: Record<string, string>
   rows: Record<string, unknown>[]
 }
 
@@ -55,12 +56,13 @@ function escapeIdentifier(name: string): string {
   return `"${name.replace(/"/g, '""')}"`
 }
 
-function escapeValue(value: unknown): string {
+function escapeValue(value: unknown, type?: string): string {
   if (value === null || value === undefined) return 'NULL'
   if (typeof value === 'number') return String(value)
   if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE'
   if (typeof value === 'object') return `'${JSON.stringify(value).replace(/'/g, "''")}'`
-  return `'${String(value).replace(/'/g, "''")}'`
+  const escaped = `'${String(value).replace(/'/g, "''")}'`
+  return type?.endsWith('[]') ? `${escaped}::${type}` : escaped
 }
 
 export function generateDeleteSQL(change: StagedChange): string {
@@ -83,11 +85,11 @@ export function generateDeleteSQL(change: StagedChange): string {
           if (value === null || value === undefined) {
             return `${escapeIdentifier(col)} IS NULL`
           }
-          return `${escapeIdentifier(col)} = ${escapeValue(value)}`
+          return `${escapeIdentifier(col)} = ${escapeValue(value, table.columnTypes?.[col])}`
         })
         .join(' AND ')
 
-      statements.push(`DELETE FROM ${qualifiedTable} WHERE ${conditions};`)
+      if (conditions) statements.push(`DELETE FROM ${qualifiedTable} WHERE ${conditions};`)
     }
   }
 
@@ -134,6 +136,7 @@ export function createStagedDelete(
       tableName,
       schemaName,
       primaryKeyColumns: pkColumns,
+      columnTypes: Object.fromEntries(cols.map(c => [c.name, c.type])),
       rows: tableRows,
     })
   }
@@ -161,7 +164,7 @@ export function generateUpdateSQL(change: StagedChange): string {
     // Determine which columns to use for WHERE clause
     const whereColumns = table.primaryKeyColumns.length > 0
       ? table.primaryKeyColumns
-      : Object.keys(table.rows[0] || {})
+      : Object.keys(change.originalRows[0] || {})
 
     for (let i = 0; i < table.rows.length; i++) {
       const updatedRow = table.rows[i]
@@ -176,7 +179,7 @@ export function generateUpdateSQL(change: StagedChange): string {
 
       // Build SET clause
       const setClause = changedColumns
-        .map(col => `${escapeIdentifier(col)} = ${escapeValue(updatedRow[col])}`)
+        .map(col => `${escapeIdentifier(col)} = ${escapeValue(updatedRow[col], table.columnTypes?.[col])}`)
         .join(', ')
 
       // Build WHERE clause using original values
@@ -186,11 +189,11 @@ export function generateUpdateSQL(change: StagedChange): string {
           if (value === null || value === undefined) {
             return `${escapeIdentifier(col)} IS NULL`
           }
-          return `${escapeIdentifier(col)} = ${escapeValue(value)}`
+          return `${escapeIdentifier(col)} = ${escapeValue(value, table.columnTypes?.[col])}`
         })
         .join(' AND ')
 
-      statements.push(`UPDATE ${qualifiedTable} SET ${setClause} WHERE ${conditions};`)
+      if (conditions) statements.push(`UPDATE ${qualifiedTable} SET ${setClause} WHERE ${conditions};`)
     }
   }
 
@@ -211,7 +214,7 @@ export function generateInsertSQL(change: StagedChange): string {
       // Skip undefined values (they will use DEFAULT)
       const columnNames = Object.keys(row).filter(col => row[col] !== undefined)
       const columns = columnNames.map(col => escapeIdentifier(col)).join(', ')
-      const values = columnNames.map(col => escapeValue(row[col])).join(', ')
+      const values = columnNames.map(col => escapeValue(row[col], table.columnTypes?.[col])).join(', ')
 
       statements.push(`INSERT INTO ${qualifiedTable} (${columns}) VALUES (${values});`)
     }
@@ -259,6 +262,7 @@ export function createStagedInsert(
       tableName,
       schemaName,
       primaryKeyColumns: pkColumns,
+      columnTypes: Object.fromEntries(cols.map(c => [c.name, c.type])),
       rows: tableRows,
     })
   }
@@ -318,6 +322,7 @@ export function createStagedUpdate(
         tableName,
         schemaName,
         primaryKeyColumns: pkColumns,
+        columnTypes: Object.fromEntries(cols.map(c => [c.name, c.type])),
         rows: [tableRow],
       })
     }

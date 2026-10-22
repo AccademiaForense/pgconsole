@@ -1,15 +1,18 @@
 import { createClient, type ConnectionDetails } from './db'
+import { isDuckgres } from './connection-cache'
 
 export interface CachedSchemaInfo {
   formatted: string // Formatted string for AI context
   lastUpdated: number // Timestamp
+  schemaKey: string
 }
 
 // Cache: connectionId -> schema info
 const schemaCache = new Map<string, CachedSchemaInfo>()
 
-export async function getSchemaCache(connectionId: string): Promise<CachedSchemaInfo | null> {
-  return schemaCache.get(connectionId) || null
+export async function getSchemaCache(connectionId: string, schemas: string[] = []): Promise<CachedSchemaInfo | null> {
+  const cached = schemaCache.get(connectionId)
+  return cached?.schemaKey === JSON.stringify([...new Set(schemas)].sort()) ? cached : null
 }
 
 export async function refreshSchemaCache(
@@ -19,10 +22,12 @@ export async function refreshSchemaCache(
   version: string,
   appUser?: string
 ): Promise<CachedSchemaInfo> {
-  const formatted = await buildSchemaContext(connectionDetails, schemas, version, appUser)
+  const database = isDuckgres(connectionId) ? 'Duckgres (DuckDB)' : `PostgreSQL ${version}`
+  const formatted = await buildSchemaContext(connectionDetails, schemas, database, appUser)
   const cached: CachedSchemaInfo = {
     formatted,
     lastUpdated: Date.now(),
+    schemaKey: JSON.stringify([...new Set(schemas)].sort()),
   }
   schemaCache.set(connectionId, cached)
   return cached
@@ -78,7 +83,7 @@ interface TableData {
 async function buildSchemaContext(
   details: ConnectionDetails,
   schemas: string[],
-  version: string,
+  database: string,
   appUser?: string
 ): Promise<string> {
   const client = createClient(details, appUser)
@@ -92,30 +97,25 @@ async function buildSchemaContext(
         obj_description(c.oid, 'pg_class') as table_comment,
         CASE c.relkind
           WHEN 'r' THEN 'TABLE'
+          WHEN 'p' THEN 'TABLE'
           WHEN 'v' THEN 'VIEW'
           WHEN 'm' THEN 'MATERIALIZED VIEW'
         END as object_type,
-        jsonb_agg(
-          jsonb_build_object(
-            'name', a.attname,
-            'type', format_type(a.atttypid, a.atttypmod),
-            'nullable', NOT a.attnotnull,
-            'default', pg_get_expr(ad.adbin, ad.adrelid),
-            'comment', col_description(c.oid, a.attnum)
-          )
-          ORDER BY a.attnum
-        ) as columns
+        a.attname as column_name,
+        format_type(a.atttypid, a.atttypmod) as column_type,
+        NOT a.attnotnull as nullable,
+        pg_get_expr(ad.adbin, ad.adrelid) as column_default,
+        col_description(c.oid, a.attnum) as column_comment
       FROM pg_class c
       JOIN pg_namespace n ON n.oid = c.relnamespace
       JOIN pg_attribute a ON a.attrelid = c.oid
       LEFT JOIN pg_attrdef ad ON ad.adrelid = c.oid AND ad.adnum = a.attnum
-      WHERE c.relkind IN ('r', 'v', 'm')
+      WHERE c.relkind IN ('r', 'p', 'v', 'm')
         AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
         ${schemas.length > 0 ? client`AND n.nspname IN ${client(schemas)}` : client``}
         AND a.attnum > 0
         AND NOT a.attisdropped
-      GROUP BY n.nspname, c.relname, c.oid, c.relkind
-      ORDER BY n.nspname, c.relname
+      ORDER BY n.nspname, c.relname, a.attnum
     `
 
     // Get constraints (PK, FK, Unique, Check)
@@ -140,8 +140,8 @@ async function buildSchemaContext(
       FROM pg_constraint con
       JOIN pg_class c ON c.oid = con.conrelid
       JOIN pg_namespace n ON n.oid = c.relnamespace
-      LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(con.conkey)
-      LEFT JOIN pg_attribute af ON af.attrelid = con.confrelid AND af.attnum = ANY(con.confkey)
+      LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND array_position(con.conkey, a.attnum) IS NOT NULL
+      LEFT JOIN pg_attribute af ON af.attrelid = con.confrelid AND array_position(con.confkey, af.attnum) IS NOT NULL
       WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
         ${schemas.length > 0 ? client`AND n.nspname IN ${client(schemas)}` : client``}
         AND con.contype IN ('p', 'f', 'u', 'c')
@@ -163,7 +163,7 @@ async function buildSchemaContext(
       JOIN pg_class c ON c.oid = ix.indrelid
       JOIN pg_class i ON i.oid = ix.indexrelid
       JOIN pg_namespace n ON n.oid = c.relnamespace
-      JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(ix.indkey)
+      JOIN pg_attribute a ON a.attrelid = c.oid AND array_position(ix.indkey::smallint[], a.attnum) IS NOT NULL
       WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
         ${schemas.length > 0 ? client`AND n.nspname IN ${client(schemas)}` : client``}
         AND NOT ix.indisprimary  -- Exclude PK indexes (shown in constraints)
@@ -177,14 +177,21 @@ async function buildSchemaContext(
     // Group tables
     for (const t of tables) {
       const key = `${t.schema_name}.${t.table_name}`
-      schemaMap.set(key, {
+      if (!schemaMap.has(key)) schemaMap.set(key, {
         schema: t.schema_name,
         table: t.table_name,
         objectType: t.object_type,
         comment: t.table_comment,
-        columns: t.columns,
+        columns: [],
         constraints: [],
         indexes: [],
+      })
+      schemaMap.get(key)!.columns.push({
+        name: t.column_name,
+        type: t.column_type,
+        nullable: t.nullable,
+        default: t.column_default,
+        comment: t.column_comment,
       })
     }
 
@@ -208,7 +215,7 @@ async function buildSchemaContext(
 
     // Format output
     const lines: string[] = []
-    lines.push(`PostgreSQL ${version}`)
+    lines.push(database)
     lines.push('')
 
     for (const table of schemaMap.values()) {

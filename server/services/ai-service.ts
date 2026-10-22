@@ -1,11 +1,13 @@
 import { ConnectError, Code } from '@connectrpc/connect'
 import type { ServiceImpl } from '@connectrpc/connect'
 import { AIService } from '../../src/gen/ai_connect'
-import { getAIProviders, getAIProviderById, getConnectionById } from '../lib/config'
-import { type ConnectionDetails } from '../lib/db'
+import { getAIProviders, getAIProviderById } from '../lib/config'
+import { buildConnectionDetails, type ConnectionDetails } from '../lib/db'
 import { generateWithVendor } from '../ai/vendors'
-import { getConnectionInfo } from '../lib/connection-cache'
+import { getConnectionInfo, isDuckgres } from '../lib/connection-cache'
 import { getSchemaCache, refreshSchemaCache } from '../lib/schema-cache'
+import { getUserFromContext } from '../connect'
+import { requireAnyPermission } from '../lib/iam'
 import {
   TEXT_TO_SQL,
   EXPLAIN_SQL,
@@ -25,31 +27,22 @@ function cleanSQLResponse(sql: string): string {
 }
 
 function getConnectionDetails(connectionId: string): ConnectionDetails {
-  const conn = getConnectionById(connectionId)
-  if (!conn) {
+  const details = buildConnectionDetails(connectionId)
+  if (!details) {
     throw new ConnectError('Connection not found', Code.NotFound)
   }
-  return {
-    host: conn.host,
-    port: conn.port,
-    database: conn.database,
-    username: conn.username,
-    password: conn.password,
-    sslMode: conn.ssl_mode || 'prefer',
-    lockTimeout: conn.lock_timeout,
-    statementTimeout: conn.statement_timeout,
-  }
+  return details
 }
 
-async function getOrRefreshSchema(connectionId: string, schemas: string[]): Promise<string> {
+async function getOrRefreshSchema(connectionId: string, schemas: string[], appUser?: string): Promise<string> {
   // Check cache first
-  let cached = await getSchemaCache(connectionId)
+  let cached = await getSchemaCache(connectionId, schemas)
 
   // Refresh if not cached
   if (!cached) {
     const details = getConnectionDetails(connectionId)
     const { version } = getConnectionInfo(connectionId)
-    cached = await refreshSchemaCache(connectionId, details, schemas, version)
+    cached = await refreshSchemaCache(connectionId, details, schemas, version, appUser)
   }
 
   return cached.formatted
@@ -120,7 +113,9 @@ function parseRiskAssessment(response: string): ParsedRiskAssessment {
 }
 
 export const aiServiceHandlers: ServiceImpl<typeof AIService> = {
-  async listAIProviders() {
+  async listAIProviders(_req, context) {
+    const user = await getUserFromContext(context.values)
+    if (!user) throw new ConnectError('Authentication required', Code.Unauthenticated)
     const providers = getAIProviders()
     return {
       providers: providers.map((p) => ({
@@ -132,10 +127,12 @@ export const aiServiceHandlers: ServiceImpl<typeof AIService> = {
     }
   },
 
-  async generateSQL(req) {
+  async generateSQL(req, context) {
     if (!req.connectionId) {
       throw new ConnectError('connection_id is required', Code.InvalidArgument)
     }
+    const user = await getUserFromContext(context.values)
+    requireAnyPermission(user, req.connectionId)
     if (!req.providerId) {
       throw new ConnectError('provider_id is required', Code.InvalidArgument)
     }
@@ -149,13 +146,10 @@ export const aiServiceHandlers: ServiceImpl<typeof AIService> = {
     }
 
     try {
-      // Skip expensive schema fetch on subsequent messages - session already has context
-      const schema = req.sessionId ? null : await getOrRefreshSchema(req.connectionId, req.schemas)
+      const schema = await getOrRefreshSchema(req.connectionId, req.schemas, user?.email)
       const { version } = getConnectionInfo(req.connectionId)
 
-      const systemPrompt = req.sessionId
-        ? null
-        : buildSystemPrompt(TEXT_TO_SQL.system, schema || '', version)
+      const systemPrompt = buildSystemPrompt(TEXT_TO_SQL.system, schema, version, isDuckgres(req.connectionId))
 
       const result = await generateWithVendor(
         provider.vendor,
@@ -174,10 +168,12 @@ export const aiServiceHandlers: ServiceImpl<typeof AIService> = {
     }
   },
 
-  async explainSQL(req) {
+  async explainSQL(req, context) {
     if (!req.connectionId) {
       throw new ConnectError('connection_id is required', Code.InvalidArgument)
     }
+    const user = await getUserFromContext(context.values)
+    requireAnyPermission(user, req.connectionId)
     if (!req.providerId) {
       throw new ConnectError('provider_id is required', Code.InvalidArgument)
     }
@@ -191,13 +187,10 @@ export const aiServiceHandlers: ServiceImpl<typeof AIService> = {
     }
 
     try {
-      // Skip expensive schema fetch on subsequent messages - session already has context
-      const schema = req.sessionId ? null : await getOrRefreshSchema(req.connectionId, req.schemas)
+      const schema = await getOrRefreshSchema(req.connectionId, req.schemas, user?.email)
       const { version } = getConnectionInfo(req.connectionId)
 
-      const systemPrompt = req.sessionId
-        ? null
-        : buildSystemPrompt(EXPLAIN_SQL.system, schema || '', version)
+      const systemPrompt = buildSystemPrompt(EXPLAIN_SQL.system, schema, version, isDuckgres(req.connectionId))
 
       // For initial request, use the template
       // For follow-up questions (when sessionId exists), pass the message as-is
@@ -222,10 +215,12 @@ export const aiServiceHandlers: ServiceImpl<typeof AIService> = {
     }
   },
 
-  async fixSQL(req) {
+  async fixSQL(req, context) {
     if (!req.connectionId) {
       throw new ConnectError('connection_id is required', Code.InvalidArgument)
     }
+    const user = await getUserFromContext(context.values)
+    requireAnyPermission(user, req.connectionId)
     if (!req.providerId) {
       throw new ConnectError('provider_id is required', Code.InvalidArgument)
     }
@@ -242,10 +237,10 @@ export const aiServiceHandlers: ServiceImpl<typeof AIService> = {
     }
 
     try {
-      const schema = await getOrRefreshSchema(req.connectionId, req.schemas)
+      const schema = await getOrRefreshSchema(req.connectionId, req.schemas, user?.email)
       const { version } = getConnectionInfo(req.connectionId)
 
-      const systemPrompt = buildSystemPrompt(FIX_SQL.system, schema, version)
+      const systemPrompt = buildSystemPrompt(FIX_SQL.system, schema, version, isDuckgres(req.connectionId))
       const userPrompt = FIX_SQL.user({ sql: req.sql, errorMessage: req.errorMessage })
 
       const result = await generateWithVendor(
@@ -265,10 +260,12 @@ export const aiServiceHandlers: ServiceImpl<typeof AIService> = {
     }
   },
 
-  async rewriteSQL(req) {
+  async rewriteSQL(req, context) {
     if (!req.connectionId) {
       throw new ConnectError('connection_id is required', Code.InvalidArgument)
     }
+    const user = await getUserFromContext(context.values)
+    requireAnyPermission(user, req.connectionId)
     if (!req.providerId) {
       throw new ConnectError('provider_id is required', Code.InvalidArgument)
     }
@@ -282,10 +279,10 @@ export const aiServiceHandlers: ServiceImpl<typeof AIService> = {
     }
 
     try {
-      const schema = await getOrRefreshSchema(req.connectionId, req.schemas)
+      const schema = await getOrRefreshSchema(req.connectionId, req.schemas, user?.email)
       const { version } = getConnectionInfo(req.connectionId)
 
-      const systemPrompt = buildSystemPrompt(REWRITE_SQL.system, schema, version)
+      const systemPrompt = buildSystemPrompt(REWRITE_SQL.system, schema, version, isDuckgres(req.connectionId))
       const userPrompt = REWRITE_SQL.user({ sql: req.sql })
 
       const result = await generateWithVendor(
@@ -305,16 +302,18 @@ export const aiServiceHandlers: ServiceImpl<typeof AIService> = {
     }
   },
 
-  async refreshSchemaCache(req) {
+  async refreshSchemaCache(req, context) {
     if (!req.connectionId) {
       throw new ConnectError('connection_id is required', Code.InvalidArgument)
     }
+    const user = await getUserFromContext(context.values)
+    requireAnyPermission(user, req.connectionId)
 
     try {
       const details = getConnectionDetails(req.connectionId)
       const { version } = getConnectionInfo(req.connectionId)
 
-      await refreshSchemaCache(req.connectionId, details, req.schemas, version)
+      await refreshSchemaCache(req.connectionId, details, req.schemas, version, user?.email)
 
       return { success: true, error: '' }
     } catch (err) {
@@ -323,10 +322,12 @@ export const aiServiceHandlers: ServiceImpl<typeof AIService> = {
     }
   },
 
-  async assessChangeRisk(req) {
+  async assessChangeRisk(req, context) {
     if (!req.connectionId) {
       throw new ConnectError('connection_id is required', Code.InvalidArgument)
     }
+    const user = await getUserFromContext(context.values)
+    requireAnyPermission(user, req.connectionId)
     if (!req.providerId) {
       throw new ConnectError('provider_id is required', Code.InvalidArgument)
     }
@@ -340,9 +341,10 @@ export const aiServiceHandlers: ServiceImpl<typeof AIService> = {
     }
 
     try {
-      const schema = await getOrRefreshSchema(req.connectionId, req.schemas)
+      const schema = await getOrRefreshSchema(req.connectionId, req.schemas, user?.email)
 
-      const systemPrompt = buildSystemPrompt(ASSESS_RISK.system, schema)
+      const { version } = getConnectionInfo(req.connectionId)
+      const systemPrompt = buildSystemPrompt(ASSESS_RISK.system, schema, version, isDuckgres(req.connectionId))
       const userPrompt = ASSESS_RISK.user({ sqlStatements: req.sqlStatements.join('\n\n') })
 
       const result = await generateWithVendor(

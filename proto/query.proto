@@ -44,6 +44,7 @@ message ExecuteSQLResponse {
 
 message Row {
   repeated string values = 1;
+  repeated uint32 null_columns = 2; // Zero-based indexes, preserving NULL separately from empty text
 }
 
 message ColumnMetadata {

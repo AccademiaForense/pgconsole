@@ -28,6 +28,7 @@ message Connection {
   string version = 11; // PostgreSQL version (e.g., "16")
   repeated string permissions = 12;
   string color = 13; // Optional per-connection environment tint (hex)
+  bool is_duckgres = 14;
 }
 
 message ListConnectionsRequest {}

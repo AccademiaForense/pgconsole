@@ -2,6 +2,7 @@ import { useColumns, useTableInfo } from '../../../hooks/useQuery'
 import { Badge } from '../../ui/badge'
 import { Button } from '../../ui/button'
 import { ScrollArea } from '../../ui/scroll-area'
+import { quoteIdentifier } from '@/lib/sql/generate'
 import { InfoItem, formatBytes, formatRowCount, getKindLabel, SQLDefinition, ColumnsTable } from './shared'
 
 interface ViewSchemaContentProps {
@@ -17,7 +18,7 @@ export function ViewSchemaContent({ connectionId, schema, view, objectType, onNe
   const { data: tableInfo, isLoading: tableInfoLoading } = useTableInfo(connectionId, schema, view)
 
   const handleNewQuery = () => {
-    onNewQuery?.(`SELECT * FROM "${schema}"."${view}" LIMIT 100;`)
+    onNewQuery?.(`SELECT * FROM ${quoteIdentifier(schema)}.${quoteIdentifier(view)} LIMIT 10;`)
   }
 
   const isMaterializedView = objectType === 'materialized_view'

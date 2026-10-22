@@ -18,6 +18,7 @@ import { detectRequiredPermissions } from './lib/sql-permissions'
 import { buildExecutableSql, formatExecutionError } from './lib/execute-sql'
 import { auditSQL } from './lib/audit'
 import { MCP_CATALOG_PAGE_SIZE, MCP_MAX_RESULT_ROWS } from '../src/lib/constants'
+import { isDuckgres } from './lib/connection-cache'
 
 declare const __APP_VERSION__: string
 
@@ -315,6 +316,7 @@ async function listConnections(principal: Principal) {
       host: c.host,
       port: c.port,
       database: c.database,
+      backend: isDuckgres(c.id) ? 'duckgres' : 'postgresql',
       permissions: [...perms],
     }))
   return { connections }
@@ -575,6 +577,9 @@ async function explainQuery(principal: Principal, args: Record<string, unknown>,
 
   const analyze = args.analyze === true
   const buffers = args.buffers === true
+  if (buffers && isDuckgres(connection)) {
+    throw new Error('Duckgres does not support EXPLAIN BUFFERS; omit the buffers option')
+  }
   const format = optStr(args, 'format')
   if (format && format !== 'text' && format !== 'json') {
     throw new Error("'format' must be 'text' or 'json'")
@@ -593,8 +598,10 @@ async function explainQuery(principal: Principal, args: Record<string, unknown>,
   const explainSql = `${opts.length ? `EXPLAIN (${opts.join(', ')})` : 'EXPLAIN'} ${innerSql}`
 
   const result = await runAndAudit(principal, 'explain_query', connection, details, explainSql, explainSql)
-  const planRows = result.rows.map((r) => (r as Record<string, unknown>)['QUERY PLAN'])
-  const plan = format === 'json' ? planRows[0] : planRows.join('\n')
+  const planRows = result.rows.map((r) => r['QUERY PLAN'] ?? r.explain_value)
+  const plan = format === 'json'
+    ? (typeof planRows[0] === 'string' ? JSON.parse(planRows[0]) : planRows[0])
+    : planRows.join('\n')
   return { plan }
 }
 

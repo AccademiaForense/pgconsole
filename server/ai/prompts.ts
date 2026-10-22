@@ -60,6 +60,7 @@ export const TEXT_TO_SQL: PromptConfig = {
 3. Prefer explicit column names over SELECT *
 4. Include appropriate WHERE clauses when the request implies filtering
 5. Use proper PostgreSQL {{version}} syntax
+6. For data browsing, default to LIMIT 10 unless the user requests a different limit
 
 ## Formatting
 
@@ -293,8 +294,13 @@ export const SYNTAX_CORRECTION: PromptConfig = {
 export function buildSystemPrompt(
   template: string,
   schema: string,
-  version?: string
+  version?: string,
+  duckgres = false
 ): string {
+  if (duckgres) {
+    template = template.replace(/PostgreSQL(?: \{\{version\}\})?/g, 'Duckgres')
+    template += '\n\nThe backend is Duckgres, which speaks the PostgreSQL protocol and runs on DuckDB/DuckLake. Use PostgreSQL-compatible SQL accepted by pgconsole, not DuckDB-only syntax. Do not recommend PostgreSQL-only features such as triggers, RLS, PL/pgSQL, or index tuning. Do not assume primary keys, uniqueness or foreign keys are enforced on DuckLake tables.'
+  }
   let result = template.replace('{{schema}}', schema)
   if (version) {
     result = result.replace('{{version}}', version)

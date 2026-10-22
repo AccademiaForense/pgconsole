@@ -10,9 +10,10 @@ import { detectRequiredPermissions } from "../lib/sql-permissions";
 import { buildExecutableSql, formatExecutionError } from "../lib/execute-sql";
 import { auditSQL, auditExport, listAuditEvents, listSystemAuditEvents, type AuditEvent } from "../lib/audit";
 import { AUDIT_LOG_FETCH_LIMIT, AUDIT_LOG_DEFAULT_LIMIT } from "../../src/lib/constants";
+import { isDuckgres } from "../lib/connection-cache";
 
 // Track active queries by queryId -> { pid, connectionDetails, email }
-const activeQueries = new Map<string, { pid: number; details: ConnectionDetails; email: string }>();
+const activeQueries = new Map<string, { pid: number; details: ConnectionDetails; email: string; connectionId: string; cancel: () => void }>();
 
 // Map an in-memory audit event to the wire AuditLogEntry. Fields absent on a given
 // event kind map to undefined (numbers, so presence is preserved) or '' (strings).
@@ -82,11 +83,25 @@ async function getColumnMetadata(
 
   // Get unique table OIDs (filter out 0 which means no table)
   const tableOids = [...new Set(columns.map(c => c.table).filter(t => t && t > 0))];
+  let fallbackOid: number | undefined;
+  if (tableOids.length === 0 && fallbackTable) {
+    const matches = await client`
+      SELECT c.oid::int as oid
+      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE c.relname = ${fallbackTable.table} AND c.relkind IN ('r', 'p')
+        AND (${fallbackTable.schema}::text IS NULL OR n.nspname = ${fallbackTable.schema})
+    `;
+    if (matches.length === 1) {
+      fallbackOid = matches[0].oid as number;
+      tableOids.push(fallbackOid);
+    }
+  }
 
   // Get type names
   const typeOids = [...new Set(columns.map(c => c.type))];
   const typeRows = await client`
-    SELECT oid::int as oid, typname
+    SELECT oid::int as oid,
+      CASE WHEN typcategory = 'A' THEN format_type(oid, -1) ELSE typname END as typname
     FROM pg_type
     WHERE oid IN ${client(typeOids)}
   `;
@@ -103,48 +118,40 @@ async function getColumnMetadata(
         c.oid::int as oid,
         n.nspname as schema_name,
         c.relname as table_name,
-        COALESCE(
-          (SELECT array_agg(a.attname)
-           FROM pg_constraint con
-           JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = ANY(con.conkey)
-           WHERE con.conrelid = c.oid AND con.contype = 'p'),
-          ARRAY[]::text[]
-        ) as pk_columns,
-        COALESCE(
-          (SELECT array_agg(a.attname)
-           FROM pg_attribute a
-           WHERE a.attrelid = c.oid AND a.attnum > 0 AND a.attnotnull),
-          ARRAY[]::text[]
-        ) as not_null_columns,
-        COALESCE(
-          (SELECT array_agg(a.attname)
-           FROM pg_attribute a
-           WHERE a.attrelid = c.oid AND a.attnum > 0 AND a.atthasdef),
-          ARRAY[]::text[]
-        ) as default_columns
+        a.attname as column_name,
+        EXISTS(SELECT 1 FROM pg_constraint con
+          WHERE con.conrelid = c.oid AND con.contype = 'p'
+            AND a.attnum = ANY(con.conkey)) as is_primary_key,
+        a.attnotnull as not_null,
+        a.atthasdef as has_default
       FROM pg_class c
       JOIN pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
       WHERE c.oid IN ${client(tableOids)}
     `;
     for (const row of tableRows) {
-      tableInfo.set(row.oid as number, {
+      if (!tableInfo.has(row.oid as number)) tableInfo.set(row.oid as number, {
         schema: row.schema_name as string,
         table: row.table_name as string,
-        pkColumns: new Set(row.pk_columns as string[]),
-        notNullColumns: new Set(row.not_null_columns as string[]),
-        defaultColumns: new Set(row.default_columns as string[]),
+        pkColumns: new Set(),
+        notNullColumns: new Set(),
+        defaultColumns: new Set(),
       });
+      const info = tableInfo.get(row.oid as number)!;
+      if (row.is_primary_key) info.pkColumns.add(row.column_name as string);
+      if (row.not_null) info.notNullColumns.add(row.column_name as string);
+      if (row.has_default) info.defaultColumns.add(row.column_name as string);
     }
   }
 
   return columns.map(col => {
-    const info = col.table ? tableInfo.get(col.table) : undefined;
+    const info = tableInfo.get(col.table || fallbackOid || 0);
     const isNotNull = info?.notNullColumns.has(col.name) || false;
     return {
       name: col.name,
       type: oidToType.get(col.type) || 'unknown',
-      tableName: info?.table || fallbackTable?.table || '',
-      schemaName: info?.schema || fallbackTable?.schema || '',
+      tableName: info?.table || '',
+      schemaName: info?.schema || '',
       isPrimaryKey: info?.pkColumns.has(col.name) || false,
       isNullable: !isNotNull,
       hasDefault: info?.defaultColumns.has(col.name) || false,
@@ -192,10 +199,6 @@ export const queryServiceHandlers: ServiceImpl<typeof QueryService> = {
       const pidResult = await client`SELECT pg_backend_pid() as pid`;
       backendPid = pidResult[0]?.pid as number ?? 0;
 
-      if (queryId && backendPid) {
-        activeQueries.set(queryId, { pid: backendPid, details, email: user.email });
-      }
-
       // Set search_path if provided
       if (req.searchPath) {
         // Quote each schema name to safely escape
@@ -216,7 +219,14 @@ export const queryServiceHandlers: ServiceImpl<typeof QueryService> = {
         backendPid,
       };
 
-      const result = await client.unsafe(executableSql);
+      const pendingQuery = client.unsafe(executableSql);
+      if (queryId) {
+        activeQueries.set(queryId, {
+          pid: backendPid, details, email: user.email, connectionId: req.connectionId,
+          cancel: () => pendingQuery.cancel(),
+        });
+      }
+      const result = await pendingQuery;
 
       const executionTimeMs = Date.now() - start;
 
@@ -230,7 +240,7 @@ export const queryServiceHandlers: ServiceImpl<typeof QueryService> = {
             type: col.type,
             table: col.table,
           })),
-          analysis.tables.length === 1 ? analysis.tables[0] : null
+          analysis.editableTable
         );
       } else if (result.length > 0) {
         // Fallback: no metadata available
@@ -250,10 +260,16 @@ export const queryServiceHandlers: ServiceImpl<typeof QueryService> = {
 
       // Convert rows to string values
       const rowsData = result.map((row: Record<string, unknown>) => ({
-        values: columns.map((col) => {
+        nullColumns: columns.flatMap((col, index) => row[col] == null ? [index] : []),
+        values: columns.map((col, index) => {
           const val = row[col];
           if (val === null || val === undefined) return "";
           if (val instanceof Date) return val.toISOString();
+          if (Array.isArray(val)) {
+            const type = result.columns?.[index]?.type;
+            const serialize = type ? client.options.serializers[type] : undefined;
+            if (serialize) return String(serialize(val));
+          }
           if (typeof val === "object") return JSON.stringify(val);
           return String(val);
         }),
@@ -317,7 +333,7 @@ export const queryServiceHandlers: ServiceImpl<typeof QueryService> = {
     }
 
     const queryInfo = activeQueries.get(req.queryId);
-    if (!queryInfo) {
+    if (!queryInfo || queryInfo.connectionId !== req.connectionId) {
       return {
         cancelled: false,
         error: "Query not found or already completed",
@@ -331,6 +347,11 @@ export const queryServiceHandlers: ServiceImpl<typeof QueryService> = {
     }
 
     try {
+      // Duckgres may return 0 for pg_backend_pid(); use the driver's wire cancellation.
+      if (!queryInfo.pid) {
+        queryInfo.cancel();
+        return { cancelled: true, error: '' };
+      }
       // Use a separate connection to cancel the query
       const result = await withConnection(queryInfo.details, async (sql) => {
         const cancelResult = await sql`SELECT pg_cancel_backend(${queryInfo.pid}) as cancelled`;
@@ -387,9 +408,10 @@ export const queryServiceHandlers: ServiceImpl<typeof QueryService> = {
 
     const tables = await withConnection(details, async (sql) => {
       const rows = await sql`
-        SELECT table_name, table_type
-        FROM information_schema.tables
-        WHERE table_schema = ${req.schema}
+        SELECT c.relname as table_name, CASE c.relkind WHEN 'v' THEN 'VIEW' ELSE 'BASE TABLE' END as table_type
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = ${req.schema} AND c.relkind IN ('r', 'p', 'v')
         ORDER BY table_type, table_name
       `;
       return rows.map((r: { table_name: string; table_type: string }) => ({
@@ -423,10 +445,7 @@ export const queryServiceHandlers: ServiceImpl<typeof QueryService> = {
       const rows = await sql`
         SELECT
           a.attname as column_name,
-          CASE WHEN t.typtype = 'b' AND t.typelem != 0 AND t.typname LIKE '\\_%'
-            THEN (SELECT et.typname FROM pg_catalog.pg_type et WHERE et.oid = t.typelem) || '[]'
-            ELSE t.typname
-          END as data_type,
+          format_type(a.atttypid, a.atttypmod) as data_type,
           NOT a.attnotnull as is_nullable,
           COALESCE(
             (SELECT true FROM pg_catalog.pg_constraint con
@@ -440,7 +459,6 @@ export const queryServiceHandlers: ServiceImpl<typeof QueryService> = {
         FROM pg_catalog.pg_attribute a
         JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-        JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
         LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
         WHERE n.nspname = ${req.schema}
           AND c.relname = ${req.table}
@@ -571,7 +589,7 @@ export const queryServiceHandlers: ServiceImpl<typeof QueryService> = {
         JOIN pg_class t ON t.oid = ix.indrelid
         JOIN pg_namespace n ON n.oid = t.relnamespace
         JOIN pg_am am ON am.oid = i.relam
-        LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+        LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND array_position(ix.indkey::smallint[], a.attnum) IS NOT NULL
         WHERE n.nspname = ${req.schema}
           AND t.relname = ${req.table}
         GROUP BY i.relname, ix.indisunique, ix.indisprimary, am.amname, ix.indexrelid
@@ -635,7 +653,7 @@ export const queryServiceHandlers: ServiceImpl<typeof QueryService> = {
           END as ref_columns
         FROM pg_constraint con
         JOIN target t ON con.conrelid = t.oid
-        LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(con.conkey)
+        LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND array_position(con.conkey, a.attnum) IS NOT NULL
         GROUP BY con.oid, con.conname, con.contype, con.confrelid, con.confkey
         UNION ALL
         -- Reverse: FK constraints from other tables referencing this table
@@ -805,6 +823,9 @@ export const queryServiceHandlers: ServiceImpl<typeof QueryService> = {
     const user = await getUserFromContext(context.values);
     requireAnyPermission(user, req.connectionId);
 
+    // Duckgres does not expose PostgreSQL table grants.
+    if (isDuckgres(req.connectionId)) return { grants: [] };
+
     const details = getConnectionDetails(req.connectionId);
 
     const grants = await withConnection(details, async (sql) => {
@@ -868,6 +889,8 @@ export const queryServiceHandlers: ServiceImpl<typeof QueryService> = {
     const user = await getUserFromContext(context.values);
     requireAnyPermission(user, req.connectionId);
 
+    if (isDuckgres(req.connectionId)) return { functions: [] };
+
     const details = getConnectionDetails(req.connectionId);
 
     const functions = await withConnection(details, async (sql) => {
@@ -907,6 +930,8 @@ export const queryServiceHandlers: ServiceImpl<typeof QueryService> = {
 
     const user = await getUserFromContext(context.values);
     requireAnyPermission(user, req.connectionId);
+
+    if (isDuckgres(req.connectionId)) return { procedures: [] };
 
     const details = getConnectionDetails(req.connectionId);
 
@@ -948,6 +973,10 @@ export const queryServiceHandlers: ServiceImpl<typeof QueryService> = {
 
     const user = await getUserFromContext(context.values);
     requireAnyPermission(user, req.connectionId);
+
+    if (isDuckgres(req.connectionId)) {
+      throw new ConnectError('Duckgres does not support PostgreSQL functions or procedures', Code.Unimplemented);
+    }
 
     const details = getConnectionDetails(req.connectionId);
 
@@ -1019,6 +1048,10 @@ export const queryServiceHandlers: ServiceImpl<typeof QueryService> = {
 
     const user = await getUserFromContext(context.values);
     requireAnyPermission(user, req.connectionId);
+
+    if (isDuckgres(req.connectionId)) {
+      throw new ConnectError('Duckgres does not support PostgreSQL functions or procedures', Code.Unimplemented);
+    }
 
     const details = getConnectionDetails(req.connectionId);
 

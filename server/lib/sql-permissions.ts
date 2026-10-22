@@ -205,6 +205,19 @@ export interface SqlAnalysis {
   transactionSafe: boolean
   /** Unique tables referenced by the statements (subqueries excluded) */
   tables: { schema: string | null; table: string }[]
+  editableTable?: { schema: string | null; table: string } | null
+}
+
+// Without wire table OIDs, only a plain single-table projection can safely be edited.
+function editableTable(stmts: Statement[]): SqlAnalysis['editableTable'] {
+  const stmt = stmts[0]
+  if (stmts.length !== 1 || stmt?.kind !== 'select') return null
+  const from = stmt.from
+  if (from?.kind !== 'table' || stmt.withClause || stmt.setOp || stmt.distinct || stmt.groupBy || stmt.having) return null
+  if (!stmt.columns.every(({ expr, alias }) => expr.kind === 'column'
+    && (!alias || alias === expr.column)
+    && (!expr.table || expr.table === from.table || expr.table === from.alias))) return null
+  return { schema: from.schema, table: from.table }
 }
 
 function collectFromTables(from: FromClause | null, out: TableRef[]): void {
@@ -243,7 +256,7 @@ function uniqueTables(stmts: Statement[]): { schema: string | null; table: strin
   const out: { schema: string | null; table: string }[] = []
   for (const stmt of stmts) {
     for (const ref of statementTables(stmt)) {
-      const key = `${ref.schema ?? ''}.${ref.table.toLowerCase()}`
+      const key = JSON.stringify([ref.schema, ref.table])
       if (seen.has(key)) continue
       seen.add(key)
       out.push({ schema: ref.schema, table: ref.table })
@@ -289,7 +302,7 @@ export async function detectRequiredPermissions(sql: string): Promise<SqlAnalysi
       }
     }
 
-    return { permissions, kinds, primaryPermissions, statementCount: parsed.statements.length, transactionSafe, tables: uniqueTables(parsed.statements) }
+    return { permissions, kinds, primaryPermissions, statementCount: parsed.statements.length, transactionSafe, tables: uniqueTables(parsed.statements), editableTable: editableTable(parsed.statements) }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     throw new Error(`SQL syntax error: ${message}`)

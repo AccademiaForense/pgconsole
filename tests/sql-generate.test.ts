@@ -4,18 +4,30 @@ import {
   generateInsert,
   generateUpdate,
   generateDelete,
+  generateCreateTable,
+  quoteIdentifier,
 } from '../src/lib/sql/generate'
 
 describe('SQL generators', () => {
+  it('quotes identifiers without splitting dots or losing embedded quotes', () => {
+    expect(quoteIdentifier('a.b"c')).toBe('"a.b""c"')
+  })
+
+  it('uses a Duckgres table template without SERIAL or unenforced primary keys', async () => {
+    const sql = await generateCreateTable(true)
+    expect(sql).toMatch(/bigint|int8/)
+    expect(sql).not.toMatch(/serial|primary key/i)
+    expect(await generateCreateTable()).toMatch(/serial/i)
+  })
   describe('generateSelect', () => {
-    it('generates a SELECT statement with LIMIT 100', async () => {
+    it('generates a SELECT statement with LIMIT 10', async () => {
       const result = await generateSelect('users')
       expect(result).toBe(`SELECT
   *
 FROM
   users
 LIMIT
-  100;`)
+  10;`)
     })
   })
 

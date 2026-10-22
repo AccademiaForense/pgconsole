@@ -724,7 +724,7 @@ export function QueryResults({
   connectionId,
   onRefreshQuery,
 }: QueryResultsProps) {
-  const { hasWrite, hasExport } = useConnectionPermissions(connectionId)
+  const { hasWrite: hasWritePermission, hasExport } = useConnectionPermissions(connectionId)
   const [filterInput, setFilterInput] = useState('')
   const [debouncedFilter, setDebouncedFilter] = useState('')
   const [elapsedTime, setElapsedTime] = useState(0)
@@ -831,6 +831,9 @@ export function QueryResults({
   }, [isExecuting, isCancelling])
 
   const activeResult = resultTabs.find((rt) => rt.id === activeResultTabId)
+  const resultColumns = activeResult?.result.columns ?? []
+  const hasWrite = hasWritePermission && resultColumns.length > 0 && resultColumns.every(col =>
+    col.tableName && col.tableName === resultColumns[0].tableName && col.schemaName === resultColumns[0].schemaName)
 
   // Check if this is an EXPLAIN result (read-only, no row interaction)
   const isExplainResult = useMemo(() => {
@@ -965,10 +968,11 @@ export function QueryResults({
           tableName,
           schemaName,
           primaryKeyColumns: pkColumns.map(c => c.name),
+          columnTypes: Object.fromEntries(columns.map(c => [c.name, c.type])),
           rows: deletes.map(d => {
             const pk: Record<string, unknown> = {}
             pkColumns.forEach(c => { pk[c.name] = d.row[c.name] })
-            return pk
+              return pkColumns.length > 0 ? pk : d.row
           }),
         }],
         rowCount: deletes.length,
@@ -989,6 +993,7 @@ export function QueryResults({
           tableName,
           schemaName,
           primaryKeyColumns: pkColumns.map(c => c.name),
+          columnTypes: Object.fromEntries(columns.map(c => [c.name, c.type])),
           rows: updates.map(u => {
             // Only include changed columns + primary keys for WHERE
             const changed: Record<string, unknown> = {}
@@ -1007,7 +1012,7 @@ export function QueryResults({
         originalRows: updates.map(u => {
           const pk: Record<string, unknown> = {}
           pkColumns.forEach(c => { pk[c.name] = u.original[c.name] })
-          return pk
+          return pkColumns.length > 0 ? pk : u.original
         }),
         rowIndices: updates.map(u => u.index),
       })
@@ -1024,6 +1029,7 @@ export function QueryResults({
           tableName,
           schemaName,
           primaryKeyColumns: [],
+          columnTypes: Object.fromEntries(columns.map(c => [c.name, c.type])),
           rows: inserts.map(i => i.row),
         }],
         rowCount: inserts.length,

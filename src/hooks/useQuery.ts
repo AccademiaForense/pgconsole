@@ -244,7 +244,7 @@ export function useExecuteSQL() {
         const mappedRows = response.rows.map(row => {
           const obj: Record<string, unknown> = {};
           response.columns.forEach((col, i) => {
-            obj[col.name] = row.values[i];
+            obj[col.name] = row.nullColumns.includes(i) ? null : row.values[i];
           });
           return obj;
         });

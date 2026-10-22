@@ -3,10 +3,7 @@ import type { createClient } from './db'
 // In-memory cache for connection runtime information
 export interface ConnectionInfo {
   version: string // PostgreSQL major version (e.g., "16")
-}
-
-interface PartialConnectionInfo {
-  version?: string
+  versionString: string // Preserve the server banner to distinguish Duckgres from PostgreSQL
 }
 
 const connectionCache = new Map<string, ConnectionInfo>()
@@ -21,13 +18,17 @@ export function getConnectionInfo(connectionId: string): ConnectionInfo {
 }
 
 // Get connection info without throwing (for optional access)
-export function tryGetConnectionInfo(connectionId: string): PartialConnectionInfo {
+export function tryGetConnectionInfo(connectionId: string): Partial<ConnectionInfo> {
   return connectionCache.get(connectionId) || {}
 }
 
-export function setConnectionVersion(connectionId: string, version: string): void {
-  const info: ConnectionInfo = { version }
+export function setConnectionVersion(connectionId: string, version: string, versionString = `PostgreSQL ${version}`): void {
+  const info: ConnectionInfo = { version, versionString }
   connectionCache.set(connectionId, info)
+}
+
+export function isDuckgres(connectionId: string): boolean {
+  return /duckgres/i.test(connectionCache.get(connectionId)?.versionString || '')
 }
 
 export function clearConnectionCache(connectionId?: string): void {
@@ -68,7 +69,7 @@ export async function testAndCacheConnection(client: ReturnType<typeof createCli
   const version = match[1]
 
   // Cache it
-  setConnectionVersion(connectionId, version)
+  setConnectionVersion(connectionId, version, versionString)
 
   return version
 }

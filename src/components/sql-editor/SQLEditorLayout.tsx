@@ -4,11 +4,11 @@ import { EditorArea } from './EditorArea'
 import { RightPanel } from './RightPanel'
 import { ResizeHandle } from '../ui/resize-handle'
 import type { useEditorTabs } from './hooks/useEditorTabs'
-import { useExecuteSQL } from '../../hooks/useQuery'
+import { useExecuteSQL, useConnections } from '../../hooks/useQuery'
 import { useSchemaStoreSync } from '../../hooks/useSchemaStoreSync'
 import { schemaStore } from '@/lib/schema-store'
 import { queryClient as rpcClient } from '@/lib/connect-client'
-import { generateSelect, generateInsert, generateUpdate, generateDelete, generateCreateTable, generateAlterAddColumn } from '@/lib/sql/generate'
+import { generateSelect, generateInsert, generateUpdate, generateDelete, generateCreateTable, generateAlterAddColumn, quoteIdentifier } from '@/lib/sql/generate'
 import { toastManager } from '../ui/toast'
 import type { ObjectType } from './ObjectTree'
 import type { SelectedObject } from '@/hooks/useEditorNavigation'
@@ -59,6 +59,8 @@ export function SQLEditorLayout({
   const containerRef = useRef<HTMLDivElement>(null)
   const insertAtCursorRef = useRef<((text: string) => void) | null>(null)
   const executeSQL = useExecuteSQL()
+  const { data: connections } = useConnections()
+  const duckgres = connections?.find(c => c.id === connectionId)?.isDuckgres ?? false
   const [initialPrompt, setInitialPrompt] = useState<{ sql: string; action: 'explain' } | null>(null)
 
   // Sync schema store with React Query data
@@ -177,7 +179,7 @@ export function SQLEditorLayout({
     }
 
     // For tables/views, run SELECT query
-    const query = `SELECT * FROM ${schema}.${objectName} LIMIT 100;`
+    const query = `SELECT * FROM ${quoteIdentifier(schema)}.${quoteIdentifier(objectName)} LIMIT 10;`
 
     // Check if a tab with the same SQL statement already exists
     const existingTab = editorTabs.tabs.find(
@@ -283,13 +285,14 @@ export function SQLEditorLayout({
   ) => {
     try {
       let sql: string
+      const tableName = `${quoteIdentifier(schema)}.${quoteIdentifier(objectName)}`
 
       if (sqlType === 'select') {
-        sql = await generateSelect(objectName)
+        sql = await generateSelect(tableName)
       } else if (sqlType === 'alter_add_column') {
-        sql = await generateAlterAddColumn(objectName)
+        sql = await generateAlterAddColumn(tableName)
       } else if (sqlType === 'create_table') {
-        sql = await generateCreateTable()
+        sql = await generateCreateTable(duckgres)
       } else {
         // Fetch columns for INSERT/UPDATE
         const columnsResponse = await rpcClient.getColumns({
@@ -313,7 +316,7 @@ export function SQLEditorLayout({
         }
 
         if (sqlType === 'insert') {
-          sql = await generateInsert(objectName, columns)
+          sql = await generateInsert(tableName, columns)
         } else {
           // Fetch constraints for UPDATE/DELETE to find PK columns
           const constraintsResponse = await rpcClient.getConstraints({
@@ -327,9 +330,9 @@ export function SQLEditorLayout({
           const pkColumns = pkConstraint?.columns ?? []
 
           if (sqlType === 'update') {
-            sql = await generateUpdate(objectName, columns, pkColumns)
+            sql = await generateUpdate(tableName, columns, pkColumns)
           } else {
-            sql = await generateDelete(objectName, pkColumns)
+            sql = await generateDelete(tableName, pkColumns)
           }
         }
       }

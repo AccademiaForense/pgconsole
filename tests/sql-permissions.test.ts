@@ -7,6 +7,26 @@ import {
 } from '../server/lib/sql-permissions'
 import { parseSql } from '../src/lib/sql/core'
 
+describe('editable result table without wire OIDs', () => {
+  it('recognizes direct columns and qualified stars from one table', async () => {
+    for (const sql of ['SELECT * FROM public.items', 'SELECT i.* FROM public.items i', 'SELECT id, body FROM public.items']) {
+      expect((await detectRequiredPermissions(sql)).editableTable).toEqual({ schema: 'public', table: 'items' })
+    }
+  })
+
+  it.each([
+    'SELECT count(*) AS id FROM public.items',
+    'SELECT upper(body) AS body FROM public.items',
+    'SELECT id AS renamed FROM public.items',
+    'SELECT * FROM public.items i JOIN public.other o ON i.id = o.id',
+    'SELECT DISTINCT id FROM public.items',
+    'WITH items AS (SELECT 1 AS id) SELECT * FROM items',
+    'SELECT id FROM public.items UNION SELECT id FROM public.items',
+  ])('leaves derived results read-only: %s', async (sql) => {
+    expect((await detectRequiredPermissions(sql)).editableTable).toBeNull()
+  })
+})
+
 describe('getRequiredPermission', () => {
   it('returns read for SELECT statements', () => {
     expect(getRequiredPermission('select')).toBe('read')
